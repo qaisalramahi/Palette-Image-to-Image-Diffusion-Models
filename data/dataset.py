@@ -17,7 +17,12 @@ def is_image_file(filename):
 
 def make_dataset(dir):
     if os.path.isfile(dir):
-        images = [i for i in np.genfromtxt(dir, dtype=np.str, encoding='utf-8')]
+        arr = np.genfromtxt(dir, dtype=str, encoding="utf-8")
+        # genfromtxt returns a scalar (0-d) if the file has only one line
+        if np.ndim(arr) == 0:
+            images = [str(arr)]
+        else:
+            images = [str(i) for i in arr]
     else:
         images = []
         assert os.path.isdir(dir), '%s is not a valid directory' % dir
