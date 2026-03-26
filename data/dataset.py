@@ -37,6 +37,9 @@ def make_dataset(dir):
 def pil_loader(path):
     return Image.open(path).convert('RGB')
 
+def pil_loader_grayscale(path):
+    return Image.open(path).convert('L')
+
 class InpaintDataset(data.Dataset):
     def __init__(self, data_root, mask_config={}, data_len=-1, image_size=[256, 256], loader=pil_loader):
         imgs = make_dataset(data_root)
@@ -177,5 +180,43 @@ class ColorizationDataset(data.Dataset):
 
     def __len__(self):
         return len(self.flist)
+
+class DenoisingDataset(data.Dataset):
+    def __init__(self, data_root, clean_dir='clean', noisy_dir='noisy', data_len=-1, image_size=[512, 512], loader=pil_loader_grayscale):
+        self.data_root = data_root
+        self.noisy_dir = noisy_dir
+        clean_path = os.path.join(data_root, clean_dir)
+        flist = make_dataset(clean_path)
+        if data_len > 0:
+            self.flist = flist[:int(data_len)]
+        else:
+            self.flist = flist
+
+        self.tfs = transforms.Compose([
+                transforms.Resize((image_size[0], image_size[1])),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5], std=[0.5])
+        ])
+        self.loader = loader
+        self.image_size = image_size
+
+    def __getitem__(self, index):
+        ret = {}
+        clean_path = self.flist[index]
+        file_name = os.path.basename(clean_path)
+
+        noisy_path = os.path.join(self.data_root, self.noisy_dir, file_name)
+
+        img = self.tfs(self.loader(clean_path))
+        cond_image = self.tfs(self.loader(noisy_path))
+
+        ret['gt_image'] = img
+        ret['cond_image'] = cond_image
+        ret['path'] = file_name
+        return ret
+
+    def __len__(self):
+        return len(self.flist)
+
 
 

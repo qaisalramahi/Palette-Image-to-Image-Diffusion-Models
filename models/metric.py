@@ -5,6 +5,8 @@ from torch.nn import functional as F
 import torch.utils.data
 
 from torchvision.models.inception import inception_v3
+from torchmetrics.image import StructuralSimilarityIndexMeasure, PeakSignalNoiseRatio
+from piq import GMSDLoss
 
 import numpy as np
 from scipy.stats import entropy
@@ -15,6 +17,26 @@ def mae(input, target):
         output = loss(input, target)
     return output
 
+def mse(input, target):
+    with torch.no_grad():
+        loss = nn.MSELoss()
+        output = loss(input, target)
+    return output
+
+def psnr(input, target):
+    with torch.no_grad():
+        psnr_metric = PeakSignalNoiseRatio(data_range=2.0).to(input.device)
+        return psnr_metric(input, target)
+
+def ssim(input, target):
+    with torch.no_grad():
+        ssim_metric = StructuralSimilarityIndexMeasure(data_range=2.0).to(input.device)
+        return ssim_metric(input, target)
+
+def gmsd(input, target):
+    with torch.no_grad():
+        gmsd_metric = GMSDLoss(data_range=2.0)
+        return gmsd_metric(input + 1, target + 1)
 
 def inception_score(imgs, cuda=True, batch_size=32, resize=False, splits=1):
     """Computes the inception score of the generated images imgs

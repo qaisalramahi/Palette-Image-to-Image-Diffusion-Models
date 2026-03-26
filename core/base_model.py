@@ -17,14 +17,15 @@ class BaseModel():
         self.phase = opt['phase']
         self.set_device = partial(Util.set_device, rank=opt['global_rank'])
 
-        ''' optimizers and schedulers '''
-        self.schedulers = []
+        ''' optimizers '''
         self.optimizers = []
 
         ''' process record '''
         self.batch_size = self.opt['datasets'][self.phase]['dataloader']['args']['batch_size']
         self.epoch = 0
-        self.iter = 0 
+        self.iter = 0
+        self.best_val_loss = float('inf')
+        self.best_model_path = None
 
         self.phase_loader = phase_loader
         self.val_loader = val_loader
@@ -44,12 +45,17 @@ class BaseModel():
 
             train_log = self.train_step()
 
-            ''' save logged informations into log dict ''' 
+            ''' save logged informations into log dict '''
             train_log.update({'epoch': self.epoch, 'iters': self.iter})
 
-            ''' print logged informations to the screen and tensorboard ''' 
-            for key, value in train_log.items():
-                self.logger.info('{:5s}: {}\t'.format(str(key), value))
+            ''' print logged informations to the screen '''
+            train_loss = train_log.get('train/mse_loss', None)
+            val_loss = train_log.get('val_loss', None)
+            print('Epoch {}/{} | train_loss: {} | val_loss: {}'.format(
+                self.epoch, self.opt['train']['n_epoch'],
+                '{:.6f}'.format(float(train_loss)) if train_loss is not None else 'N/A',
+                '{:.6f}'.format(float(val_loss)) if val_loss is not None else 'N/A'
+            ))
             
             if self.epoch % self.opt['train']['save_checkpoint_epoch'] == 0:
                 self.logger.info('Saving the self at the end of epoch {:.0f}'.format(self.epoch))
@@ -61,8 +67,28 @@ class BaseModel():
                     self.logger.warning('Validation stop where dataloader is None, Skip it.')
                 else:
                     val_log = self.val_step()
-                    for key, value in val_log.items():
-                        self.logger.info('{:5s}: {}\t'.format(str(key), value))
+                    metrics_str = ' | '.join('{} (restoration): {:.6f}'.format(k, float(v)) for k, v in val_log.items())
+                    print('Epoch {}/{} | {}'.format(self.epoch, self.opt['train']['n_epoch'], metrics_str))
+
+                    # Save best model based on first validation metric
+                    val_metric_values = [float(v) for k, v in val_log.items() if k not in ('epoch', 'iters')]
+                    if val_metric_values:
+                        current_val_loss = val_metric_values[0]
+                        if current_val_loss < self.best_val_loss:
+                            self.logger.info('New best validation loss: {:.6f} (prev: {:.6f}). Saving best model.'.format(
+                                current_val_loss, self.best_val_loss))
+                            self.best_val_loss = current_val_loss
+                            # Delete previous best model files
+                            if self.best_model_path is not None:
+                                for f in os.listdir(self.opt['path']['checkpoint']):
+                                    if f.startswith('best_'):
+                                        old_path = os.path.join(self.opt['path']['checkpoint'], f)
+                                        os.remove(old_path)
+                                        self.logger.info('Deleted old best model: {}'.format(f))
+                            # Save new best model
+                            self.best_model_path = os.path.join(self.opt['path']['checkpoint'], 'best_epoch{}'.format(self.epoch))
+                            self.save_everything_best()
+
                 self.logger.info("\n------------------------------Validation End------------------------------\n\n")
         self.logger.info('Number of Epochs has reached the limit, End.')
 
@@ -91,6 +117,31 @@ class BaseModel():
         net_struc_str = '{}'.format(network.__class__.__name__)
         self.logger.info('Network structure: {}, with parameters: {:,d}'.format(net_struc_str, n))
         self.logger.info(s)
+
+    def save_training_state_best(self):
+        """ saves training state for best model, only work on GPU 0 """
+        if self.opt['global_rank'] !=0:
+            return
+        assert isinstance(self.optimizers, list), 'optimizers must be a list.'
+        state = {'epoch': self.epoch, 'iter': self.iter, 'optimizers': []}
+        for o in self.optimizers:
+            state['optimizers'].append(o.state_dict())
+        save_filename = 'best_epoch{}.state'.format(self.epoch)
+        save_path = os.path.join(self.opt['path']['checkpoint'], save_filename)
+        torch.save(state, save_path)
+
+    def save_network_best(self, network, network_label):
+        """ save best network weights, only work on GPU 0 """
+        if self.opt['global_rank'] !=0:
+            return
+        save_filename = 'best_epoch{}_{}.pth'.format(self.epoch, network_label)
+        save_path = os.path.join(self.opt['path']['checkpoint'], save_filename)
+        if isinstance(network, nn.DataParallel) or isinstance(network, nn.parallel.DistributedDataParallel):
+            network = network.module
+        state_dict = network.state_dict()
+        for key, param in state_dict.items():
+            state_dict[key] = param.cpu()
+        torch.save(state_dict, save_path)
 
     def save_network(self, network, network_label):
         """ save network structure, only work on GPU 0 """
@@ -125,10 +176,8 @@ class BaseModel():
         """ saves training state during training, only work on GPU 0 """
         if self.opt['global_rank'] !=0:
             return
-        assert isinstance(self.optimizers, list) and isinstance(self.schedulers, list), 'optimizers and schedulers must be a list.'
-        state = {'epoch': self.epoch, 'iter': self.iter, 'schedulers': [], 'optimizers': []}
-        for s in self.schedulers:
-            state['schedulers'].append(s.state_dict())
+        assert isinstance(self.optimizers, list), 'optimizers must be a list.'
+        state = {'epoch': self.epoch, 'iter': self.iter, 'optimizers': []}
         for o in self.optimizers:
             state['optimizers'].append(o.state_dict())
         save_filename = '{}.state'.format(self.epoch)
@@ -139,26 +188,22 @@ class BaseModel():
         """ resume the optimizers and schedulers for training, only work when phase is test or resume training enable """
         if self.phase!='train' or self. opt['path']['resume_state'] is None:
             return
-        self.logger.info('Beign loading training states'.format())
-        assert isinstance(self.optimizers, list) and isinstance(self.schedulers, list), 'optimizers and schedulers must be a list.'
-        
-        state_path = "{}.state".format(self. opt['path']['resume_state'])
-        
+        self.logger.info('Begin loading training states')
+        assert isinstance(self.optimizers, list), 'optimizers must be a list.'
+
+        state_path = "{}.state".format(self.opt['path']['resume_state'])
+
         if not os.path.exists(state_path):
             self.logger.warning('Training state in [{:s}] is not existed, Skip it'.format(state_path))
             return
 
         self.logger.info('Loading training state for [{:s}] ...'.format(state_path))
         resume_state = torch.load(state_path, map_location = lambda storage, loc: self.set_device(storage))
-        
+
         resume_optimizers = resume_state['optimizers']
-        resume_schedulers = resume_state['schedulers']
         assert len(resume_optimizers) == len(self.optimizers), 'Wrong lengths of optimizers {} != {}'.format(len(resume_optimizers), len(self.optimizers))
-        assert len(resume_schedulers) == len(self.schedulers), 'Wrong lengths of schedulers {} != {}'.format(len(resume_schedulers), len(self.schedulers))
         for i, o in enumerate(resume_optimizers):
             self.optimizers[i].load_state_dict(o)
-        for i, s in enumerate(resume_schedulers):
-            self.schedulers[i].load_state_dict(s)
 
         self.epoch = resume_state['epoch']
         self.iter = resume_state['iter']

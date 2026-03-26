@@ -1,0 +1,162 @@
+{
+    "name": "denoising_sdedit_experiment",
+    "gpu_ids": [
+        0
+    ],
+    "seed": -1,
+    "finetune_norm": false,
+    "path": {
+        "base_dir": "experiments",
+        "code": "code",
+        "tb_logger": "tb_logger",
+        "results": "results",
+        "checkpoint": "checkpoint",
+        "resume_state": null
+    },
+    "datasets": {
+        "train": {
+            "which_dataset": {
+                "name": [
+                    "data.dataset",
+                    "DenoisingDataset"
+                ],
+                "args": {
+                    "data_root": "data",
+                    "clean_dir": "train_clean",
+                    "noisy_dir": "train_noisy",
+                    "image_size": [256,256]
+                }
+            },
+            "dataloader": {
+                "validation_split": 0.125,
+                "args": {
+                    "batch_size": 2,
+                    "num_workers": 1,
+                    "shuffle": true,
+                    "pin_memory": false,
+                    "drop_last": true
+                },
+                "val_args": {
+                    "batch_size": 2,
+                    "num_workers": 1,
+                    "shuffle": false,
+                    "pin_memory": false,
+                    "drop_last": false
+                }
+            }
+        },
+        "test": {
+            "which_dataset": {
+                "name": [
+                    "data.dataset",
+                    "DenoisingDataset"
+                ],
+                "args": {
+                    "data_root": "data",
+                    "clean_dir": "test_clean",
+                    "noisy_dir": "test_noisy",
+                    "image_size": [256,256]
+                }
+            },
+            "dataloader": {
+                "args": {
+                    "batch_size": 2,
+                    "num_workers": 1,
+                    "pin_memory": false
+                }
+            }
+        }
+    },
+    "model": {
+        "which_model": {
+            "name": [
+                "models.model_sdedit",
+                "PaletteSDEdit"
+            ],
+            "args": {
+                "sample_num": 1,
+                "task": "denoising",
+                "ema_scheduler": {
+                    "ema_start": 1,
+                    "ema_iter": 1,
+                    "ema_decay": 0.9999
+                },
+                "optimizers": [
+                    {
+                        "lr": 5e-05,
+                        "weight_decay": 0
+                    }
+                ]
+            }
+        },
+        "which_networks": [
+            {
+                "name": [
+                    "models.network_sdedit",
+                    "NetworkSDEdit"
+                ],
+                "args": {
+                    "init_type": "kaiming",
+                    "module_name": "guided_diffusion",
+                    "sdedit_t0": 100,
+                    "unet": {
+                        "in_channel": 2,
+                        "out_channel": 1,
+                        "inner_channel": 64,
+                        "channel_mults": [
+                            1,
+                            2,
+                            4,
+                            8
+                        ],
+                        "attn_res": [
+                            16
+                        ],
+                        "num_head_channels": 32,
+                        "res_blocks": 2,
+                        "dropout": 0.2,
+                        "image_size": 256
+                    },
+                    "beta_schedule": {
+                        "train": {
+                            "schedule": "linear",
+                            "n_timestep": 1000,
+                            "linear_start": 1e-04,
+                            "linear_end": 0.02
+                        },
+                        "test": {
+                            "schedule": "linear",
+                            "n_timestep": 1000,
+                            "linear_start": 1e-04,
+                            "linear_end": 0.02
+                        }
+                    }
+                }
+            }
+        ],
+        "which_losses": [
+            "mse_loss"
+        ],
+        "which_metrics": [
+            "mse",
+            "mae",
+            "psnr",
+            "ssim",
+            "gmsd"
+        ]
+    },
+    "train": {
+        "n_epoch": 500,
+        "n_iter": 100000,
+        "val_epoch": 10,
+        "save_checkpoint_epoch": 10,
+        "log_iter": 212,
+        "tensorboard": true
+    },
+    "debug": {
+        "val_epoch": 1,
+        "save_checkpoint_epoch": 1,
+        "log_iter": 10,
+        "debug_split": 50
+    }
+}

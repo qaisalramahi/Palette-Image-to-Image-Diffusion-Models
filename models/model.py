@@ -1,5 +1,4 @@
 import torch
-import tqdm
 from core.base_model import BaseModel
 from core.logger import LogTracker
 import copy
@@ -104,7 +103,7 @@ class Palette(BaseModel):
     def train_step(self):
         self.netG.train()
         self.train_metrics.reset()
-        for train_data in tqdm.tqdm(self.phase_loader):
+        for train_data in self.phase_loader:
             self.set_input(train_data)
             self.optG.zero_grad()
             loss = self.netG(self.gt_image, self.cond_image, mask=self.mask)
@@ -116,7 +115,6 @@ class Palette(BaseModel):
             self.train_metrics.update(self.loss_fn.__name__, loss.item())
             if self.iter % self.opt['train']['log_iter'] == 0:
                 for key, value in self.train_metrics.result().items():
-                    self.logger.info('{:5s}: {}\t'.format(str(key), value))
                     self.writer.add_scalar(key, value)
                 for key, value in self.get_current_visuals().items():
                     self.writer.add_images(key, value)
@@ -124,28 +122,42 @@ class Palette(BaseModel):
                 if self.iter > self.ema_scheduler['ema_start'] and self.iter % self.ema_scheduler['ema_iter'] == 0:
                     self.EMA.update_model_average(self.netG_EMA, self.netG)
 
-        for scheduler in self.schedulers:
-            scheduler.step()
-        return self.train_metrics.result()
-    
+        # Quick validation loss (forward pass only, no restoration)
+        result = self.train_metrics.result()
+        if self.val_loader is not None:
+            self.netG.eval()
+            val_losses = []
+            with torch.no_grad():
+                for val_data in self.val_loader:
+                    self.set_input(val_data)
+                    loss = self.netG(self.gt_image, self.cond_image, mask=self.mask)
+                    val_losses.append(loss.item())
+            val_loss_avg = sum(val_losses) / len(val_losses)
+            self.writer.set_iter(self.epoch, self.iter, phase='val')
+            self.writer.add_scalar('val_forward/mse_loss', val_loss_avg)
+            result['val_loss'] = val_loss_avg
+            self.netG.train()
+
+        return result
+
     def val_step(self):
         self.netG.eval()
         self.val_metrics.reset()
         with torch.no_grad():
-            for val_data in tqdm.tqdm(self.val_loader):
+            for val_data in self.val_loader:
                 self.set_input(val_data)
                 if self.opt['distributed']:
                     if self.task in ['inpainting','uncropping']:
-                        self.output, self.visuals = self.netG.module.restoration(self.cond_image, y_t=self.cond_image, 
+                        self.output, self.visuals = self.netG.module.restoration(self.cond_image, y_t=self.cond_image,
                             y_0=self.gt_image, mask=self.mask, sample_num=self.sample_num)
                     else:
-                        self.output, self.visuals = self.netG.module.restoration(self.cond_image, sample_num=self.sample_num)
+                        self.output, self.visuals = self.netG.module.restoration(self.cond_image, y_t=self.cond_image, sample_num=self.sample_num)
                 else:
                     if self.task in ['inpainting','uncropping']:
-                        self.output, self.visuals = self.netG.restoration(self.cond_image, y_t=self.cond_image, 
+                        self.output, self.visuals = self.netG.restoration(self.cond_image, y_t=self.cond_image,
                             y_0=self.gt_image, mask=self.mask, sample_num=self.sample_num)
                     else:
-                        self.output, self.visuals = self.netG.restoration(self.cond_image, sample_num=self.sample_num)
+                        self.output, self.visuals = self.netG.restoration(self.cond_image, y_t=self.cond_image, sample_num=self.sample_num)
                     
                 self.iter += self.batch_size
                 self.writer.set_iter(self.epoch, self.iter, phase='val')
@@ -154,7 +166,6 @@ class Palette(BaseModel):
                     key = met.__name__
                     value = met(self.gt_image, self.output)
                     self.val_metrics.update(key, value)
-                    self.writer.add_scalar(key, value)
                 for key, value in self.get_current_visuals(phase='val').items():
                     self.writer.add_images(key, value)
                 self.writer.save_images(self.save_current_results())
@@ -165,20 +176,20 @@ class Palette(BaseModel):
         self.netG.eval()
         self.test_metrics.reset()
         with torch.no_grad():
-            for phase_data in tqdm.tqdm(self.phase_loader):
+            for phase_data in self.phase_loader:
                 self.set_input(phase_data)
                 if self.opt['distributed']:
                     if self.task in ['inpainting','uncropping']:
-                        self.output, self.visuals = self.netG.module.restoration(self.cond_image, y_t=self.cond_image, 
+                        self.output, self.visuals = self.netG.module.restoration(self.cond_image, y_t=self.cond_image,
                             y_0=self.gt_image, mask=self.mask, sample_num=self.sample_num)
                     else:
-                        self.output, self.visuals = self.netG.module.restoration(self.cond_image, sample_num=self.sample_num)
+                        self.output, self.visuals = self.netG.module.restoration(self.cond_image, y_t=self.cond_image, sample_num=self.sample_num)
                 else:
                     if self.task in ['inpainting','uncropping']:
-                        self.output, self.visuals = self.netG.restoration(self.cond_image, y_t=self.cond_image, 
+                        self.output, self.visuals = self.netG.restoration(self.cond_image, y_t=self.cond_image,
                             y_0=self.gt_image, mask=self.mask, sample_num=self.sample_num)
                     else:
-                        self.output, self.visuals = self.netG.restoration(self.cond_image, sample_num=self.sample_num)
+                        self.output, self.visuals = self.netG.restoration(self.cond_image, y_t=self.cond_image, sample_num=self.sample_num)
                         
                 self.iter += self.batch_size
                 self.writer.set_iter(self.epoch, self.iter, phase='test')
@@ -192,12 +203,18 @@ class Palette(BaseModel):
                 self.writer.save_images(self.save_current_results())
         
         test_log = self.test_metrics.result()
-        ''' save logged informations into log dict ''' 
+        ''' save logged informations into log dict '''
         test_log.update({'epoch': self.epoch, 'iters': self.iter})
 
-        ''' print logged informations to the screen and tensorboard ''' 
+        ''' print logged informations to the screen and tensorboard '''
+        print('\n' + '='*50)
+        print('TEST RESULTS')
+        print('='*50)
         for key, value in test_log.items():
+            if key not in ('epoch', 'iters'):
+                print('{}: {:.6f}'.format(key, float(value)))
             self.logger.info('{:5s}: {}\t'.format(str(key), value))
+        print('='*50)
 
     def load_networks(self):
         """ save pretrained model and training state, which only do on GPU 0. """
@@ -219,3 +236,14 @@ class Palette(BaseModel):
         if self.ema_scheduler is not None:
             self.save_network(network=self.netG_EMA, network_label=netG_label+'_ema')
         self.save_training_state()
+
+    def save_everything_best(self):
+        """ save best model weights and training state. """
+        if self.opt['distributed']:
+            netG_label = self.netG.module.__class__.__name__
+        else:
+            netG_label = self.netG.__class__.__name__
+        self.save_network_best(network=self.netG, network_label=netG_label)
+        if self.ema_scheduler is not None:
+            self.save_network_best(network=self.netG_EMA, network_label=netG_label+'_ema')
+        self.save_training_state_best()
